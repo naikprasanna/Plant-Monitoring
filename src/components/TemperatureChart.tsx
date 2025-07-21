@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import ReactECharts from 'echarts-for-react';
 import * as echarts from 'echarts';
+import signalRService from '../services/signalRService';
+import apiService from '../services/apiService';
+import type { PlantTemperatureData } from '../services/signalRService';
 
 interface TemperatureDataPoint {
   timestamp: number;
@@ -40,36 +43,17 @@ const TemperatureChart: React.FC<TemperatureChartProps> = ({ isDarkMode = true }
   const dataRef = useRef<TemperatureDataPoint[]>([]);
   const zoomStateRef = useRef<{ start: number; end: number }>({ start: 99.99, end: 100 });
 
-  const generateDummyData = (): TemperatureDataPoint[] => {
-    const data: TemperatureDataPoint[] = [];
-    const now = Date.now();
-    const twoDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
-    
-    for (let time = twoDaysAgo; time <= now; time += 1000) {
-      const hour = new Date(time).getHours();
-      const dayOfWeek = new Date(time).getDay();
-      
-      const baseTemp = 0;
-      const dailyVariation = Math.sin((hour - 6) * Math.PI / 12) * 3;
-      const weeklyVariation = Math.sin(dayOfWeek * Math.PI / 7) * 0.5;
-      const randomVariation = (Math.random() - 0.5) * 0.5;
-      
-      let temperature = baseTemp + dailyVariation + weeklyVariation + randomVariation;
-      temperature = Math.max(-5, Math.min(5, temperature));
-      
-      if (Math.random() < 0.001) {
-        const spikeDirection = Math.random() > 0.5 ? 1 : -1;
-        const spikeIntensity = Math.random() * 10 + 6;
-        temperature = spikeDirection * spikeIntensity;
-      }
-      
-      data.push({
-        timestamp: time,
-        temperature: Math.round(temperature * 10) / 10
-      });
+  const fetchHistoricalData = async (): Promise<TemperatureDataPoint[]> => {
+    try {
+      const apiData = await apiService.getHistoricalTemperatureData();
+      return apiData.map(item => ({
+        timestamp: item.timestamp,
+        temperature: item.temperature
+      }));
+    } catch (error) {
+      console.error('Failed to fetch historical data, using fallback:', error);
+      return [];
     }
-    
-    return data;
   };
 
   const detectSpikes = (data: TemperatureDataPoint[]) => {
@@ -89,10 +73,10 @@ const TemperatureChart: React.FC<TemperatureChartProps> = ({ isDarkMode = true }
     return { upperSpikes, lowerSpikes };
   };
 
-  const updateChartData = () => {
+  const updateChartData = (plantData: PlantTemperatureData) => {
     const newPoint: TemperatureDataPoint = {
-      timestamp: Date.now(),
-      temperature: Math.round((Math.random() - 0.5) * 10 * 10) / 10
+      timestamp: plantData.timestamp,
+      temperature: plantData.temperature
     };
     
     dataRef.current = [...dataRef.current, newPoint];
@@ -245,12 +229,39 @@ const TemperatureChart: React.FC<TemperatureChartProps> = ({ isDarkMode = true }
   };
 
   useEffect(() => {
-    dataRef.current = generateDummyData();
+    const loadHistoricalData = async () => {
+      const data = await fetchHistoricalData();
+      dataRef.current = data;
+    };
+    loadHistoricalData();
   }, []);
 
   useEffect(() => {
-    const interval = setInterval(updateChartData, 1000);
-    return () => clearInterval(interval);
+    let temperatureListener: ((data: PlantTemperatureData) => void) | null = null;
+    
+    const connectToSignalR = async () => {
+      try {
+        await signalRService.startConnection();
+        console.log('🌡️ SignalR connected for TemperatureChart');
+        temperatureListener = (data: PlantTemperatureData) => {
+          console.log('🌡️ Plant Temperature Received in Chart:', data);
+          updateChartData(data);
+        };
+        signalRService.onPlantTemperatureReceived(temperatureListener);
+      } catch (error) {
+        console.error('Failed to connect to SignalR for chart:', error);
+        
+      }
+    };
+
+    connectToSignalR();
+
+   
+    return () => {
+      if (temperatureListener) {
+        signalRService.removeListener(temperatureListener);
+      }
+    };
   }, []);
 
   const { upperSpikes, lowerSpikes } = detectSpikes(dataRef.current);
